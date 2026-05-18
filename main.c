@@ -51,6 +51,10 @@ typedef struct {
     DocState docs[MAX_DOCS];
     int      docCount;
 
+    // Non-empty while a slow load (OCR / PDF) is running on the UI thread.
+    // Painted as a banner over the file list so the user sees what's happening.
+    char busyMessage[256];
+
     // Per-row remove-button hit rects, written by the painter and consumed by
     // WM_LBUTTONDOWN. Length tracks docCount each paint.
     RECT     removeRects[MAX_DOCS];
@@ -139,6 +143,20 @@ static void SetStatus(App* a, const char* msg) {
     if (a->hwndStatus) SetWindowTextA(a->hwndStatus, msg);
 }
 
+// Set the busy banner text and force a synchronous repaint so the banner
+// appears BEFORE the slow (OCR / PDF) call freezes the UI thread.
+static void ShowBusy(App* a, const char* msg) {
+    strncpy(a->busyMessage, msg, sizeof(a->busyMessage) - 1);
+    a->busyMessage[sizeof(a->busyMessage) - 1] = '\0';
+    InvalidateRect(a->hwndMain, &a->listRect, TRUE);
+    UpdateWindow(a->hwndMain);   // pumps WM_PAINT now
+}
+
+static void ClearBusy(App* a) {
+    a->busyMessage[0] = '\0';
+    InvalidateRect(a->hwndMain, &a->listRect, TRUE);
+}
+
 static const char* VerdictFor(double pct, COLORREF* color) {
     if (pct >= 70.0)      { *color = CLR_DANGER;  return "HIGH - Likely Plagiarism"; }
     else if (pct >= 40.0) { *color = CLR_WARNING; return "MEDIUM - Suspicious"; }
@@ -206,6 +224,22 @@ static bool AddOneFileCB(const char* path, void* user) {
         s->skippedFull++;
         return false;     // stop the multi-select iteration
     }
+
+    // Surface a prominent banner before the slow load. Forces a synchronous
+    // repaint so the user sees what's happening while the UI thread blocks.
+    const char* nm = GetBaseName(path);
+    char msg[256];
+    if (s->useOcr) {
+        snprintf(msg, sizeof(msg), "Running OCR on %s ...", nm);
+    } else {
+        const char* ext = GetExtLower(path);
+        if (strcmp(ext, ".pdf") == 0)
+            snprintf(msg, sizeof(msg), "Extracting PDF: %s ...", nm);
+        else
+            snprintf(msg, sizeof(msg), "Loading %s ...", nm);
+    }
+    ShowBusy(s->app, msg);
+
     DocState* d = &s->app->docs[s->app->docCount];
     if (LoadDocFromPath(s->app, d, path, s->useOcr)) {
         s->app->docCount++;
@@ -231,6 +265,8 @@ static void HandleAdd(App* a, BOOL useOcr) {
         ? PickImageFiles(a->hwndMain, AddOneFileCB, &s)
         : PickDocumentFiles(a->hwndMain, AddOneFileCB, &s);
     (void)picked;
+
+    ClearBusy(a);
 
     if (s.addedOk == 0 && s.skippedFull == 0 && s.skippedFail == 0) {
         // User cancelled.
@@ -530,6 +566,38 @@ static void OnPaint(App* a, HDC hdc) {
     DrawFileListPanel(hdc, a->listRect, rows, a->docCount, MAX_DOCS,
                       a->docCount < MAX_DOCS);
     for (int i = 0; i < a->docCount; i++) a->removeRects[i] = rows[i].removeRect;
+
+    // Busy banner — drawn ON TOP of the file list while OCR / PDF runs.
+    if (a->busyMessage[0]) {
+        RECT banner;
+        banner.left   = a->listRect.left  + 24;
+        banner.right  = a->listRect.right - 24;
+        banner.top    = a->listRect.top   + 48;
+        banner.bottom = banner.top + 72;
+        if (banner.bottom > a->listRect.bottom - 12)
+            banner.bottom = a->listRect.bottom - 12;
+
+        // Background panel with accent border
+        DrawPanel(hdc, banner, CLR_ACCENT_PRESS, CLR_ACCENT_HOVER);
+
+        // Tag line above main text
+        RECT tag = banner;
+        tag.top    += 8;
+        tag.bottom  = tag.top + 18;
+        SelectObject(hdc, hFontLabel);
+        SetTextColor(hdc, CLR_TEXT_PRIMARY);
+        DrawTextA(hdc, "BUSY — please wait", -1, &tag,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        // Main message
+        RECT msgArea = banner;
+        msgArea.top    += 26;
+        msgArea.bottom -= 6;
+        SelectObject(hdc, hFontVerdict);
+        SetTextColor(hdc, CLR_TEXT_PRIMARY);
+        DrawTextA(hdc, a->busyMessage, -1, &msgArea,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
 
     // Results
     MatrixResult mr;
