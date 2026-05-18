@@ -1,0 +1,87 @@
+# --- Build artifacts ---------------------------------------------------------
+*.exe
+*.out
+*.app
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.pdb
+*.ilk
+*.exp
+*.idb
+*.map
+
+# --- Linker / debug ----------------------------------------------------------
+*.stackdump
+*.gch
+*.pch
+*.dwo
+
+# --- Build / output directories ---------------------------------------------
+build/
+bin/
+obj/
+out/
+Debug/
+Release/
+x64/
+x86/
+
+# --- CMake -------------------------------------------------------------------
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+
+# --- Editors / IDEs ----------------------------------------------------------
+.vscode/
+.vs/
+.idea/
+*.swp
+*.swo
+*~
+*.iml
+.cproject
+.project
+.settings/
+*.code-workspace
+
+# --- OS junk -----------------------------------------------------------------
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# --- Local logs / scratch ----------------------------------------------------
+*.log
+*.tmp
+*.bak
+*.orig
+report.txt
+output.txt
+scratch/
+samples/private/
+
+# --- Claude Code local session data -----------------------------------------
+.claude/
+
+# --- Secrets (defensive) -----------------------------------------------------
+.env
+.env.*
+!.env.example
+secrets.json
+credentials.json
+*.pem
+*.key
