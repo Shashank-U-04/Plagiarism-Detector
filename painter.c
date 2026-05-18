@@ -169,19 +169,6 @@ void DrawFileListPanel(HDC hdc, RECT rect, FileListRow* rows, int rowCount,
 // Matrix results panel
 // ---------------------------------------------------------------------------
 
-static const char* TruncForHeader(const char* s, char* buf, int bufSz, int max) {
-    if (!s) { buf[0] = '\0'; return buf; }
-    int n = (int)strlen(s);
-    if (n <= max) {
-        snprintf(buf, bufSz, "%s", s);
-        return buf;
-    }
-    int keep = max - 1;
-    if (keep < 1) keep = 1;
-    snprintf(buf, bufSz, "%.*s…", keep, s);
-    return buf;
-}
-
 static void DrawMatrixGrid(HDC hdc, RECT area, const MatrixResult* r) {
     int n = r->count;
     if (n <= 0) return;
@@ -190,48 +177,53 @@ static void DrawMatrixGrid(HDC hdc, RECT area, const MatrixResult* r) {
     int areaW = area.right - area.left;
     int areaH = area.bottom - area.top;
 
-    int rowH = 26;
-    int headerColW = 130;
+    int rowH = 32;
+    int headerColW = 170;
     int cellW = (areaW - headerColW - 8) / n;
-    if (cellW < 60)  cellW = 60;
-    if (cellW > 110) cellW = 110;
+    if (cellW < 70)  cellW = 70;
+    if (cellW > 130) cellW = 130;
 
     int totalH = rowH * (n + 1);
     if (totalH > areaH) {
         rowH = areaH / (n + 1);
-        if (rowH < 18) rowH = 18;
+        if (rowH < 22) rowH = 22;
     }
 
     int gridLeft = area.left;
     int gridTop  = area.top;
+    int gridRight  = gridLeft + headerColW + cellW * n;
+    int gridBottom = gridTop  + rowH * (n + 1);
 
     SetBkMode(hdc, TRANSPARENT);
-    SelectObject(hdc, hFontLabel);
 
-    // Header row (column numbers)
+    // ---- Header row (column numbers): solid band across the top ----
+    RECT topBand;
+    topBand.left   = gridLeft;
+    topBand.top    = gridTop;
+    topBand.right  = gridRight;
+    topBand.bottom = gridTop + rowH;
+    HBRUSH bandBr = CreateSolidBrush(CLR_CELL_HEADER);
+    FillRect(hdc, &topBand, bandBr);
+    DeleteObject(bandBr);
+
+    SelectObject(hdc, hFontButton);  // bold for headers
+    SetTextColor(hdc, CLR_TEXT_PRIMARY);
     for (int j = 0; j < n; j++) {
         RECT hc;
         hc.left   = gridLeft + headerColW + j * cellW;
         hc.top    = gridTop;
         hc.right  = hc.left + cellW;
         hc.bottom = gridTop + rowH;
-
-        HBRUSH br = CreateSolidBrush(CLR_CELL_HEADER);
-        FillRect(hdc, &hc, br);
-        DeleteObject(br);
-
         char lbl[16];
         snprintf(lbl, sizeof(lbl), "#%d", j + 1);
-        SetTextColor(hdc, CLR_TEXT_PRIMARY);
         DrawTextA(hdc, lbl, -1, &hc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
-    // Header column (filenames) + data cells
-    char nameBuf[64];
+    // ---- Data rows ----
     for (int i = 0; i < n; i++) {
         int ry = gridTop + (i + 1) * rowH;
 
-        // Row header
+        // Row header (filename column) — filled band
         RECT rh;
         rh.left   = gridLeft;
         rh.top    = ry;
@@ -242,12 +234,19 @@ static void DrawMatrixGrid(HDC hdc, RECT area, const MatrixResult* r) {
         FillRect(hdc, &rh, br);
         DeleteObject(br);
 
-        const char* shown = TruncForHeader(r->names[i], nameBuf, sizeof(nameBuf), 16);
-        char rowLbl[80];
-        snprintf(rowLbl, sizeof(rowLbl), "%d. %s", i + 1, shown);
-        rh.left += 6;
+        // Filename label. Let GDI handle truncation via DT_END_ELLIPSIS so we
+        // avoid embedding Unicode ellipsis bytes in the ANSI text path.
+        char rowLbl[320];
+        const char* nm = r->names[i] ? r->names[i] : "(unnamed)";
+        snprintf(rowLbl, sizeof(rowLbl), "%d. %s", i + 1, nm);
+
+        RECT rt = rh;
+        rt.left += 10;
+        rt.right -= 6;
+        SelectObject(hdc, hFontButton);  // bold for row headers too
         SetTextColor(hdc, CLR_TEXT_PRIMARY);
-        DrawTextA(hdc, rowLbl, -1, &rh, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        DrawTextA(hdc, rowLbl, -1, &rt,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
         // Data cells
         for (int j = 0; j < n; j++) {
@@ -258,12 +257,11 @@ static void DrawMatrixGrid(HDC hdc, RECT area, const MatrixResult* r) {
             c.bottom = ry + rowH;
 
             if (i == j) {
+                // Diagonal: just a darker fill, no text glyph (keeps the ANSI
+                // text path clean and reads obviously as "self" by position).
                 HBRUSH d = CreateSolidBrush(CLR_CELL_DIAG);
                 FillRect(hdc, &c, d);
                 DeleteObject(d);
-
-                SetTextColor(hdc, CLR_TEXT_MUTED);
-                DrawTextA(hdc, "—", -1, &c, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             } else {
                 double pct = r->matrix[i * n + j];
                 COLORREF bg = MatrixCellColor(pct);
@@ -271,35 +269,71 @@ static void DrawMatrixGrid(HDC hdc, RECT area, const MatrixResult* r) {
                 FillRect(hdc, &c, cb);
                 DeleteObject(cb);
 
-                // Highlight the top pair
-                if ((i == r->top_a && j == r->top_b) || (i == r->top_b && j == r->top_a)) {
-                    HPEN hp = CreatePen(PS_SOLID, 2, CLR_TEXT_PRIMARY);
-                    HPEN oldP = (HPEN)SelectObject(hdc, hp);
-                    HBRUSH oldB = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
-                    Rectangle(hdc, c.left + 1, c.top + 1, c.right - 1, c.bottom - 1);
-                    SelectObject(hdc, oldP);
-                    SelectObject(hdc, oldB);
-                    DeleteObject(hp);
-                }
-
                 char txt[16];
                 snprintf(txt, sizeof(txt), "%.1f%%", pct);
+                SelectObject(hdc, hFontButton);  // bold percentages
                 SetTextColor(hdc, CLR_TEXT_PRIMARY);
                 DrawTextA(hdc, txt, -1, &c, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }
         }
     }
 
-    // Grid outline
-    HPEN pen = CreatePen(PS_SOLID, 1, CLR_BORDER);
-    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
-    HBRUSH oldBr = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
-    Rectangle(hdc, gridLeft, gridTop,
-                   gridLeft + headerColW + cellW * n,
-                   gridTop  + rowH * (n + 1));
-    SelectObject(hdc, oldPen);
-    SelectObject(hdc, oldBr);
-    DeleteObject(pen);
+    // ---- Grid lines: 1px between every cell + outer border ----
+    HPEN gpen = CreatePen(PS_SOLID, 1, CLR_CELL_GRID);
+    HPEN oldP = (HPEN)SelectObject(hdc, gpen);
+
+    // Vertical lines: after row header, then between each data column
+    for (int j = 0; j <= n; j++) {
+        int x = gridLeft + headerColW + j * cellW;
+        if (j == 0) x = gridLeft + headerColW;
+        MoveToEx(hdc, x, gridTop, NULL);
+        LineTo  (hdc, x, gridBottom);
+    }
+    MoveToEx(hdc, gridLeft, gridTop, NULL);
+    LineTo  (hdc, gridLeft, gridBottom);
+
+    // Horizontal lines: after header row, between each data row
+    for (int i = 0; i <= n; i++) {
+        int y = gridTop + (i + 1) * rowH;
+        MoveToEx(hdc, gridLeft, y, NULL);
+        LineTo  (hdc, gridRight, y);
+    }
+    MoveToEx(hdc, gridLeft, gridTop, NULL);
+    LineTo  (hdc, gridRight, gridTop);
+
+    SelectObject(hdc, oldP);
+    DeleteObject(gpen);
+
+    // ---- Top-pair highlight: subtle inset accent outline ----
+    if (n >= 2) {
+        for (int pass = 0; pass < 2; pass++) {
+            int i = pass == 0 ? r->top_a : r->top_b;
+            int j = pass == 0 ? r->top_b : r->top_a;
+            if (i == j) continue;
+            RECT c;
+            c.left   = gridLeft + headerColW + j * cellW + 2;
+            c.top    = gridTop  + (i + 1) * rowH + 2;
+            c.right  = gridLeft + headerColW + (j + 1) * cellW - 2;
+            c.bottom = gridTop  + (i + 2) * rowH - 2;
+
+            HPEN hp = CreatePen(PS_SOLID, 2, CLR_ACCENT_HOVER);
+            HPEN op = (HPEN)SelectObject(hdc, hp);
+            HBRUSH ob = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+            Rectangle(hdc, c.left, c.top, c.right, c.bottom);
+            SelectObject(hdc, op);
+            SelectObject(hdc, ob);
+            DeleteObject(hp);
+        }
+    }
+
+    // ---- Outer border ----
+    HPEN obpen = CreatePen(PS_SOLID, 1, CLR_BORDER);
+    HPEN oldOB = (HPEN)SelectObject(hdc, obpen);
+    HBRUSH oldOBR = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    Rectangle(hdc, gridLeft, gridTop, gridRight, gridBottom);
+    SelectObject(hdc, oldOB);
+    SelectObject(hdc, oldOBR);
+    DeleteObject(obpen);
 }
 
 void DrawMatrixResultsPanel(HDC hdc, RECT rect, const MatrixResult* r) {

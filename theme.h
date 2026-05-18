@@ -17,11 +17,12 @@
 #define CLR_BORDER        RGB(55,   55,  80)
 #define CLR_PROGRESS_BG   RGB(45,   45,  65)
 
-#define CLR_CELL_HIGH     RGB(120,  35,  40)
-#define CLR_CELL_MED      RGB(120,  90,  20)
-#define CLR_CELL_LOW      RGB(30,   90,  50)
-#define CLR_CELL_DIAG     RGB(40,   40,  60)
-#define CLR_CELL_HEADER   RGB(50,   50,  72)
+#define CLR_CELL_HIGH     RGB(150,  45,  55)
+#define CLR_CELL_MED      RGB(150, 110,  25)
+#define CLR_CELL_LOW      RGB(40,  115,  70)
+#define CLR_CELL_DIAG     RGB(30,   30,  46)
+#define CLR_CELL_HEADER   RGB(58,   58,  90)
+#define CLR_CELL_GRID     RGB(20,   20,  35)
 
 extern HFONT hFontTitle;
 extern HFONT hFontSection;
