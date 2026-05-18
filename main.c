@@ -192,32 +192,73 @@ static int LoadDocFromPath(App* a, DocState* d, const char* path, BOOL useOcr) {
     return 1;
 }
 
+typedef struct {
+    App* app;
+    BOOL useOcr;
+    int  addedOk;
+    int  skippedFull;
+    int  skippedFail;
+} AddSession;
+
+static bool AddOneFileCB(const char* path, void* user) {
+    AddSession* s = (AddSession*)user;
+    if (s->app->docCount >= MAX_DOCS) {
+        s->skippedFull++;
+        return false;     // stop the multi-select iteration
+    }
+    DocState* d = &s->app->docs[s->app->docCount];
+    if (LoadDocFromPath(s->app, d, path, s->useOcr)) {
+        s->app->docCount++;
+        s->addedOk++;
+    } else {
+        s->skippedFail++;
+    }
+    return true;          // continue
+}
+
 static void HandleAdd(App* a, BOOL useOcr) {
     if (a->docCount >= MAX_DOCS) {
         SetStatus(a, "Maximum of 10 documents reached");
         return;
     }
-    char path[MAX_PATH] = "";
-    BOOL ok = useOcr
-        ? PickImageFile(a->hwndMain, path, sizeof(path))
-        : PickDocumentFile(a->hwndMain, path, sizeof(path));
-    if (!ok) return;
 
-    DocState* d = &a->docs[a->docCount];
-    if (LoadDocFromPath(a, d, path, useOcr)) {
-        a->docCount++;
-        MatrixReset(a);                // any prior analysis is stale
-        EnableWindow(a->hwndBtnSave, FALSE);
-        EnableWindow(a->hwndBtnAnalyze, a->docCount >= 2);
-        EnableWindow(a->hwndBtnAddText, a->docCount < MAX_DOCS);
-        EnableWindow(a->hwndBtnAddOcr,  a->docCount < MAX_DOCS);
-        InvalidateRect(a->hwndMain, NULL, TRUE);
-        char msg[512];
-        snprintf(msg, sizeof(msg), "Loaded %s (%zu chars). Total: %d/%d",
-                 d->name, d->normalized ? strlen(d->normalized) : 0,
-                 a->docCount, MAX_DOCS);
-        SetStatus(a, msg);
+    AddSession s;
+    s.app = a;
+    s.useOcr = useOcr;
+    s.addedOk = s.skippedFull = s.skippedFail = 0;
+
+    int picked = useOcr
+        ? PickImageFiles(a->hwndMain, AddOneFileCB, &s)
+        : PickDocumentFiles(a->hwndMain, AddOneFileCB, &s);
+    (void)picked;
+
+    if (s.addedOk == 0 && s.skippedFull == 0 && s.skippedFail == 0) {
+        // User cancelled.
+        return;
     }
+
+    MatrixReset(a);
+    EnableWindow(a->hwndBtnSave, FALSE);
+    EnableWindow(a->hwndBtnAnalyze, a->docCount >= 2);
+    EnableWindow(a->hwndBtnAddText, a->docCount < MAX_DOCS);
+    EnableWindow(a->hwndBtnAddOcr,  a->docCount < MAX_DOCS);
+    InvalidateRect(a->hwndMain, NULL, TRUE);
+
+    char msg[256];
+    if (s.skippedFull > 0) {
+        snprintf(msg, sizeof(msg),
+                 "Added %d file(s). %d skipped (10-file cap). Total: %d/%d",
+                 s.addedOk, s.skippedFull, a->docCount, MAX_DOCS);
+    } else if (s.skippedFail > 0) {
+        snprintf(msg, sizeof(msg),
+                 "Added %d file(s). %d failed to load. Total: %d/%d",
+                 s.addedOk, s.skippedFail, a->docCount, MAX_DOCS);
+    } else {
+        snprintf(msg, sizeof(msg),
+                 "Added %d file(s). Total: %d/%d",
+                 s.addedOk, a->docCount, MAX_DOCS);
+    }
+    SetStatus(a, msg);
 }
 
 static void RemoveDoc(App* a, int idx) {

@@ -3,15 +3,16 @@
 
 #include <stdbool.h>
 
-// Open a native Win32 file picker accepting PDF, image, or text files.
-// On success fills outPath (size outSize) and returns true.
-bool PickInputFile(char* outPath, int outSize);
+// Callback invoked once per chosen path. Return false to stop the iteration
+// early (e.g. when the caller's capacity is full).
+typedef bool (*FilePickCallback)(const char* fullPath, void* user);
 
-// Pick a document (.txt or .pdf). Returns true on success.
-bool PickDocumentFile(void* hwndOwner, char* outPath, int outSize);
+// Multi-select document picker (.txt / .pdf). Returns number of files
+// successfully visited; 0 if the user cancelled.
+int PickDocumentFiles(void* hwndOwner, FilePickCallback visit, void* user);
 
-// Pick an image for OCR (.png/.jpg/.jpeg/.bmp/.tif/.tiff). Returns true on success.
-bool PickImageFile(void* hwndOwner, char* outPath, int outSize);
+// Multi-select image picker for OCR (.png/.jpg/.jpeg/.bmp/.tif/.tiff).
+int PickImageFiles(void* hwndOwner, FilePickCallback visit, void* user);
 
 // Save-as dialog for report (.txt). Returns true on success.
 bool PickSaveReportFile(void* hwndOwner, char* outPath, int outSize);
