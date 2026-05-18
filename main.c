@@ -18,19 +18,17 @@
 #define APP_TITLE   "Plagiarism Detector"
 #define APP_CLASS   "PlagiarismDetectorMainWnd"
 
-#define WIN_W       1100
-#define WIN_H       760
+#define WIN_W       1180
+#define WIN_H       820
+
+#define MAX_DOCS    10
 
 // Control IDs
-#define ID_BTN_LOAD1     101
-#define ID_BTN_OCR1      102
-#define ID_BTN_LOAD2     103
-#define ID_BTN_OCR2      104
+#define ID_BTN_ADD_TEXT  101
+#define ID_BTN_ADD_OCR   102
 #define ID_BTN_ANALYZE   105
 #define ID_BTN_SAVE      106
 #define ID_BTN_RESET     107
-#define ID_PREVIEW1      108
-#define ID_PREVIEW2      109
 #define ID_STATUS        110
 
 typedef struct {
@@ -38,30 +36,41 @@ typedef struct {
     char  name[256];
     char* text;        // raw extracted text (malloc'd)
     char* normalized;  // normalized text (malloc'd)
+    int   is_ocr;      // 1 if loaded via OCR
 } DocState;
 
 typedef struct {
     HWND hwndMain;
-    HWND hwndPreview1;
-    HWND hwndPreview2;
     HWND hwndStatus;
-    HWND hwndBtnLoad1;
-    HWND hwndBtnOcr1;
-    HWND hwndBtnLoad2;
-    HWND hwndBtnOcr2;
+    HWND hwndBtnAddText;
+    HWND hwndBtnAddOcr;
     HWND hwndBtnAnalyze;
     HWND hwndBtnSave;
     HWND hwndBtnReset;
 
-    DocState doc1;
-    DocState doc2;
+    DocState docs[MAX_DOCS];
+    int      docCount;
 
-    AnalysisResult result;
-    char* lcs_text;     // owned string for result.lcs_preview
-    char  verdict_buf[64];
+    // Per-row remove-button hit rects, written by the painter and consumed by
+    // WM_LBUTTONDOWN. Length tracks docCount each paint.
+    RECT     removeRects[MAX_DOCS];
 
-    RECT panel1Rect;
-    RECT panel2Rect;
+    // Matrix state
+    double   matrix[MAX_DOCS * MAX_DOCS];
+    int      matrixCount;             // 0 when no analysis is current
+    int      top_a;
+    int      top_b;
+    double   top_percentage;
+    int      top_lcs_length;
+    char*    top_lcs_preview;         // owned
+    char     top_verdict_buf[64];
+    COLORREF top_verdict_color;
+
+    // Cached pointer arrays passed to painter (kept here so they live long enough)
+    const char* nameSlots[MAX_DOCS];
+
+    // Layout rects
+    RECT listRect;
     RECT resultsRect;
     RECT statusRect;
 
@@ -71,7 +80,9 @@ typedef struct {
 
 static App g_app;
 
-// -------- utility helpers --------
+// ---------------------------------------------------------------------------
+// utility helpers
+// ---------------------------------------------------------------------------
 
 static const char* GetBaseName(const char* p) {
     const char* a = strrchr(p, '\\');
@@ -111,44 +122,21 @@ static void DocReset(DocState* d) {
     free(d->normalized); d->normalized = NULL;
     d->path[0] = '\0';
     d->name[0] = '\0';
+    d->is_ocr = 0;
 }
 
-static void ResultReset(App* a) {
-    free(a->lcs_text); a->lcs_text = NULL;
-    memset(&a->result, 0, sizeof(a->result));
-    a->verdict_buf[0] = '\0';
+static void MatrixReset(App* a) {
+    free(a->top_lcs_preview); a->top_lcs_preview = NULL;
+    a->matrixCount = 0;
+    a->top_a = a->top_b = 0;
+    a->top_percentage = 0.0;
+    a->top_lcs_length = 0;
+    a->top_verdict_buf[0] = '\0';
+    a->top_verdict_color = CLR_TEXT_PRIMARY;
 }
 
 static void SetStatus(App* a, const char* msg) {
     if (a->hwndStatus) SetWindowTextA(a->hwndStatus, msg);
-}
-
-static void SetPreviewText(HWND hEdit, const char* text, const char* fileName) {
-    if (!hEdit) return;
-    if (!text || !*text) {
-        SetWindowTextA(hEdit, "(no document loaded)");
-        return;
-    }
-    // Show up to first 8000 chars with a header line
-    size_t n = strlen(text);
-    if (n > 8000) n = 8000;
-    char* buf = (char*)malloc(n + 256);
-    if (!buf) return;
-    int pre = snprintf(buf, 256, "[%s]\r\n\r\n", fileName ? fileName : "");
-    memcpy(buf + pre, text, n);
-    buf[pre + n] = '\0';
-    // Convert lone \n to \r\n for Edit control display
-    char* out = (char*)malloc(strlen(buf) * 2 + 1);
-    if (!out) { free(buf); return; }
-    char* o = out;
-    for (char* p = buf; *p; p++) {
-        if (*p == '\n' && (p == buf || *(p-1) != '\r')) { *o++ = '\r'; *o++ = '\n'; }
-        else *o++ = *p;
-    }
-    *o = '\0';
-    SetWindowTextA(hEdit, out);
-    free(out);
-    free(buf);
 }
 
 static const char* VerdictFor(double pct, COLORREF* color) {
@@ -157,7 +145,9 @@ static const char* VerdictFor(double pct, COLORREF* color) {
     else                  { *color = CLR_SUCCESS; return "LOW - Looks Original"; }
 }
 
-// -------- loaders --------
+// ---------------------------------------------------------------------------
+// document loading / removal
+// ---------------------------------------------------------------------------
 
 static int LoadDocFromPath(App* a, DocState* d, const char* path, BOOL useOcr) {
     DocReset(d);
@@ -182,10 +172,11 @@ static int LoadDocFromPath(App* a, DocState* d, const char* path, BOOL useOcr) {
         }
         SetStatus(a, "Running OCR ...");
         text = ExtractTextFromImage(path);
+        d->is_ocr = 1;
     } else if (strcmp(ext, ".pdf") == 0) {
         SetStatus(a, "Extracting PDF text ...");
         text = ExtractTextFromPDF(path);
-    } else { // txt and unknown -> plain read
+    } else {
         SetStatus(a, "Reading file ...");
         text = ReadFileText(path);
     }
@@ -201,43 +192,159 @@ static int LoadDocFromPath(App* a, DocState* d, const char* path, BOOL useOcr) {
     return 1;
 }
 
-// -------- analyze --------
-
-static void RunAnalysis(App* a) {
-    if (!a->doc1.normalized || !a->doc2.normalized) {
-        SetStatus(a, "Load BOTH documents before analyzing");
+static void HandleAdd(App* a, BOOL useOcr) {
+    if (a->docCount >= MAX_DOCS) {
+        SetStatus(a, "Maximum of 10 documents reached");
         return;
     }
-    SetStatus(a, "Analyzing ...");
+    char path[MAX_PATH] = "";
+    BOOL ok = useOcr
+        ? PickImageFile(a->hwndMain, path, sizeof(path))
+        : PickDocumentFile(a->hwndMain, path, sizeof(path));
+    if (!ok) return;
 
-    ResultReset(a);
+    DocState* d = &a->docs[a->docCount];
+    if (LoadDocFromPath(a, d, path, useOcr)) {
+        a->docCount++;
+        MatrixReset(a);                // any prior analysis is stale
+        EnableWindow(a->hwndBtnSave, FALSE);
+        EnableWindow(a->hwndBtnAnalyze, a->docCount >= 2);
+        EnableWindow(a->hwndBtnAddText, a->docCount < MAX_DOCS);
+        EnableWindow(a->hwndBtnAddOcr,  a->docCount < MAX_DOCS);
+        InvalidateRect(a->hwndMain, NULL, TRUE);
+        char msg[512];
+        snprintf(msg, sizeof(msg), "Loaded %s (%zu chars). Total: %d/%d",
+                 d->name, d->normalized ? strlen(d->normalized) : 0,
+                 a->docCount, MAX_DOCS);
+        SetStatus(a, msg);
+    }
+}
 
+static void RemoveDoc(App* a, int idx) {
+    if (idx < 0 || idx >= a->docCount) return;
+    DocReset(&a->docs[idx]);
+    for (int i = idx; i < a->docCount - 1; i++) {
+        a->docs[i] = a->docs[i + 1];
+    }
+    memset(&a->docs[a->docCount - 1], 0, sizeof(DocState));
+    a->docCount--;
+
+    MatrixReset(a);
+    EnableWindow(a->hwndBtnSave, FALSE);
+    EnableWindow(a->hwndBtnAnalyze, a->docCount >= 2);
+    EnableWindow(a->hwndBtnAddText, a->docCount < MAX_DOCS);
+    EnableWindow(a->hwndBtnAddOcr,  a->docCount < MAX_DOCS);
+    InvalidateRect(a->hwndMain, NULL, TRUE);
+
+    char msg[64];
+    snprintf(msg, sizeof(msg), "Removed file. Total: %d/%d", a->docCount, MAX_DOCS);
+    SetStatus(a, msg);
+}
+
+// ---------------------------------------------------------------------------
+// analysis (N-way matrix)
+// ---------------------------------------------------------------------------
+
+static void RunAnalysis(App* a) {
+    if (a->docCount < 2) {
+        SetStatus(a, "Add at least 2 documents before analyzing");
+        return;
+    }
+    SetStatus(a, "Analyzing pairs ...");
+
+    MatrixReset(a);
+    a->matrixCount = a->docCount;
+    int n = a->matrixCount;
+
+    // Fill matrix with rolling-row LCS (length-only, cheap memory)
+    for (int i = 0; i < n; i++) {
+        a->matrix[i * n + i] = 0.0;
+        for (int j = i + 1; j < n; j++) {
+            const char* t1 = a->docs[i].normalized ? a->docs[i].normalized : "";
+            const char* t2 = a->docs[j].normalized ? a->docs[j].normalized : "";
+            double pct = CalculateSimilarity(t1, t2);
+            a->matrix[i * n + j] = pct;
+            a->matrix[j * n + i] = pct;
+        }
+    }
+
+    // Pick the highest pair
+    double best = -1.0;
+    int ba = 0, bb = 1;
+    for (int i = 0; i < n; i++) {
+        for (int j = i + 1; j < n; j++) {
+            double v = a->matrix[i * n + j];
+            if (v > best) { best = v; ba = i; bb = j; }
+        }
+    }
+    a->top_a = ba;
+    a->top_b = bb;
+    a->top_percentage = best < 0 ? 0.0 : best;
+
+    // Recover matched segment for the top pair via full-DP
     int lcs_len = 0;
     char* lcs = NULL;
-    double pct = AnalyzeLCS(a->doc1.normalized, a->doc2.normalized, &lcs_len, &lcs);
+    const char* tA = a->docs[ba].normalized ? a->docs[ba].normalized : "";
+    const char* tB = a->docs[bb].normalized ? a->docs[bb].normalized : "";
+    double pctVerify = AnalyzeLCS(tA, tB, &lcs_len, &lcs);
+    (void)pctVerify;  // matches the rolling-row figure modulo rounding
+    a->top_lcs_length = lcs_len;
+    a->top_lcs_preview = lcs;
 
     COLORREF vc;
-    const char* v = VerdictFor(pct, &vc);
-    strncpy(a->verdict_buf, v, sizeof(a->verdict_buf) - 1);
-    a->verdict_buf[sizeof(a->verdict_buf) - 1] = '\0';
-
-    a->result.percentage    = pct;
-    a->result.lcs_length    = lcs_len;
-    a->result.len1          = (int)strlen(a->doc1.normalized);
-    a->result.len2          = (int)strlen(a->doc2.normalized);
-    a->result.verdict       = a->verdict_buf;
-    a->result.verdict_color = vc;
-    a->lcs_text             = lcs;
-    a->result.lcs_preview   = lcs;
-    a->result.has_result    = 1;
+    const char* v = VerdictFor(a->top_percentage, &vc);
+    strncpy(a->top_verdict_buf, v, sizeof(a->top_verdict_buf) - 1);
+    a->top_verdict_buf[sizeof(a->top_verdict_buf) - 1] = '\0';
+    a->top_verdict_color = vc;
 
     EnableWindow(a->hwndBtnSave, TRUE);
     InvalidateRect(a->hwndMain, &a->resultsRect, TRUE);
-    SetStatus(a, "Analysis complete");
+
+    char msg[128];
+    snprintf(msg, sizeof(msg),
+             "Analysis complete: %d pairs, highest %.1f%%",
+             n * (n - 1) / 2, a->top_percentage);
+    SetStatus(a, msg);
+}
+
+// ---------------------------------------------------------------------------
+// save report (with ASCII matrix)
+// ---------------------------------------------------------------------------
+
+static void WriteReportMatrix(FILE* f, App* a) {
+    int n = a->matrixCount;
+    if (n <= 0) return;
+
+    fprintf(f, "SIMILARITY MATRIX (%%)\r\n");
+
+    // Header row: column numbers
+    fprintf(f, "         ");
+    for (int j = 0; j < n; j++) fprintf(f, "  #%-5d", j + 1);
+    fprintf(f, "\r\n");
+
+    // Data rows
+    for (int i = 0; i < n; i++) {
+        fprintf(f, "  #%-3d   ", i + 1);
+        for (int j = 0; j < n; j++) {
+            if (i == j) fprintf(f, "  %-5s ", "-");
+            else        fprintf(f, "  %5.1f ", a->matrix[i * n + j]);
+        }
+        fprintf(f, "  %s\r\n", a->docs[i].name);
+    }
+    fprintf(f, "\r\n");
+
+    fprintf(f, "FILE INDEX\r\n");
+    for (int i = 0; i < n; i++) {
+        fprintf(f, "  #%-2d  %s%s\r\n", i + 1,
+                a->docs[i].name,
+                a->docs[i].is_ocr ? "   [OCR]" : "");
+        fprintf(f, "        %s\r\n", a->docs[i].path);
+    }
+    fprintf(f, "\r\n");
 }
 
 static void SaveReport(App* a) {
-    if (!a->result.has_result) {
+    if (a->matrixCount <= 0) {
         SetStatus(a, "Nothing to save - run analysis first");
         return;
     }
@@ -252,39 +359,46 @@ static void SaveReport(App* a) {
     char ts[64];
     strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", lt);
 
+    int n = a->matrixCount;
+    int pairCount = n * (n - 1) / 2;
+
     fprintf(f, "PLAGIARISM DETECTION REPORT\r\n");
     fprintf(f, "Generated : %s\r\n", ts);
+    fprintf(f, "Files     : %d\r\n", n);
+    fprintf(f, "Pairs     : %d\r\n", pairCount);
     fprintf(f, "----------------------------------------\r\n");
-    fprintf(f, "Document 1 : %s\r\n", a->doc1.name);
-    fprintf(f, "             %s\r\n", a->doc1.path);
-    fprintf(f, "Document 2 : %s\r\n", a->doc2.name);
-    fprintf(f, "             %s\r\n", a->doc2.path);
+    fprintf(f, "Highest pair : %s  vs  %s\r\n",
+            a->docs[a->top_a].name, a->docs[a->top_b].name);
+    fprintf(f, "Similarity   : %.2f %%\r\n", a->top_percentage);
+    fprintf(f, "Verdict      : %s\r\n", a->top_verdict_buf);
+    fprintf(f, "LCS length   : %d characters\r\n", a->top_lcs_length);
     fprintf(f, "----------------------------------------\r\n");
-    fprintf(f, "Similarity : %.2f %%\r\n", a->result.percentage);
-    fprintf(f, "Verdict    : %s\r\n", a->result.verdict);
-    fprintf(f, "LCS length : %d characters\r\n", a->result.lcs_length);
-    fprintf(f, "Doc 1 len  : %d\r\n", a->result.len1);
-    fprintf(f, "Doc 2 len  : %d\r\n", a->result.len2);
+
+    WriteReportMatrix(f, a);
+
     fprintf(f, "----------------------------------------\r\n");
-    fprintf(f, "Matching LCS preview:\r\n");
-    if (a->lcs_text) fputs(a->lcs_text, f);
+    fprintf(f, "Matching LCS preview (top pair):\r\n");
+    if (a->top_lcs_preview) fputs(a->top_lcs_preview, f);
     fprintf(f, "\r\n");
     fclose(f);
     SetStatus(a, "Report saved");
 }
 
 static void ResetAll(App* a) {
-    DocReset(&a->doc1);
-    DocReset(&a->doc2);
-    ResultReset(a);
-    SetPreviewText(a->hwndPreview1, NULL, NULL);
-    SetPreviewText(a->hwndPreview2, NULL, NULL);
+    for (int i = 0; i < a->docCount; i++) DocReset(&a->docs[i]);
+    a->docCount = 0;
+    MatrixReset(a);
     EnableWindow(a->hwndBtnSave, FALSE);
+    EnableWindow(a->hwndBtnAnalyze, FALSE);
+    EnableWindow(a->hwndBtnAddText, TRUE);
+    EnableWindow(a->hwndBtnAddOcr,  TRUE);
     InvalidateRect(a->hwndMain, NULL, TRUE);
     SetStatus(a, "Reset");
 }
 
-// -------- layout --------
+// ---------------------------------------------------------------------------
+// layout
+// ---------------------------------------------------------------------------
 
 static void Layout(App* a) {
     RECT cr;
@@ -293,60 +407,38 @@ static void Layout(App* a) {
     int H = cr.bottom - cr.top;
 
     int margin = 16;
-    int gap = 16;
     int titleH = 56;
-    int panelW = (W - margin * 2 - gap) / 2;
-    int panelH = 280;
-    int panelY = titleH;
 
-    int btnH = 32;
-    int btnGap = 8;
-    int previewH = panelH - 16 - btnH * 2 - btnGap - 32; // header + 2 buttons
+    // File list panel: enough to show MAX_DOCS rows
+    int listH = 32 + MAX_DOCS * 24 + 16;     // header + rows + padding
+    a->listRect.left   = margin;
+    a->listRect.top    = titleH;
+    a->listRect.right  = W - margin;
+    a->listRect.bottom = titleH + listH;
 
-    a->panel1Rect.left   = margin;
-    a->panel1Rect.top    = panelY;
-    a->panel1Rect.right  = margin + panelW;
-    a->panel1Rect.bottom = panelY + panelH;
+    // Add buttons row directly under the file list
+    int btnRowY = a->listRect.bottom + 10;
+    int addW = 180;
+    int addGap = 12;
+    int addH = 32;
+    MoveWindow(a->hwndBtnAddText, margin,                   btnRowY, addW, addH, TRUE);
+    MoveWindow(a->hwndBtnAddOcr,  margin + addW + addGap,   btnRowY, addW, addH, TRUE);
 
-    a->panel2Rect.left   = margin + panelW + gap;
-    a->panel2Rect.top    = panelY;
-    a->panel2Rect.right  = margin + panelW + gap + panelW;
-    a->panel2Rect.bottom = panelY + panelH;
-
-    // Panel 1 children
-    int p1x = a->panel1Rect.left + 12;
-    int p1y = a->panel1Rect.top + 36;
-    int pw  = panelW - 24;
-    MoveWindow(a->hwndPreview1, p1x, p1y, pw, previewH, TRUE);
-    int by = p1y + previewH + 8;
-    int halfW = (pw - btnGap) / 2;
-    MoveWindow(a->hwndBtnLoad1, p1x,                 by, halfW, btnH, TRUE);
-    MoveWindow(a->hwndBtnOcr1,  p1x + halfW + btnGap, by, halfW, btnH, TRUE);
-
-    // Panel 2 children
-    int p2x = a->panel2Rect.left + 12;
-    int p2y = a->panel2Rect.top + 36;
-    MoveWindow(a->hwndPreview2, p2x, p2y, pw, previewH, TRUE);
-    int by2 = p2y + previewH + 8;
-    MoveWindow(a->hwndBtnLoad2, p2x,                 by2, halfW, btnH, TRUE);
-    MoveWindow(a->hwndBtnOcr2,  p2x + halfW + btnGap, by2, halfW, btnH, TRUE);
-
-    // Analyze button row
-    int anaY = panelY + panelH + 12;
-    int anaW = 260;
-    int anaH = 42;
-    MoveWindow(a->hwndBtnAnalyze, (W - anaW) / 2, anaY, anaW, anaH, TRUE);
+    // Analyze button (centered, same row, right of add buttons)
+    int anaW = 240;
+    int anaH = 38;
+    MoveWindow(a->hwndBtnAnalyze, W - margin - anaW, btnRowY - 3, anaW, anaH, TRUE);
 
     // Results panel
-    int resY = anaY + anaH + 14;
+    int resY = btnRowY + addH + 14;
     int resH = H - resY - margin - 56;
-    if (resH < 160) resH = 160;
+    if (resH < 200) resH = 200;
     a->resultsRect.left   = margin;
     a->resultsRect.top    = resY;
     a->resultsRect.right  = W - margin;
     a->resultsRect.bottom = resY + resH;
 
-    // Bottom toolbar (save / reset / status)
+    // Bottom toolbar
     int botY = a->resultsRect.bottom + 10;
     int saveW = 140;
     MoveWindow(a->hwndBtnSave,  margin,             botY, saveW, 32, TRUE);
@@ -361,7 +453,9 @@ static void Layout(App* a) {
                a->statusRect.right - a->statusRect.left, 24, TRUE);
 }
 
-// -------- painting --------
+// ---------------------------------------------------------------------------
+// painting
+// ---------------------------------------------------------------------------
 
 static void OnPaint(App* a, HDC hdc) {
     RECT cr;
@@ -380,33 +474,47 @@ static void OnPaint(App* a, HDC hdc) {
 
     SelectObject(hdc, hFontLabel);
     SetTextColor(hdc, CLR_TEXT_MUTED);
-    const char* sub = "Compare two documents using LCS dynamic programming";
+    const char* sub = "Compare up to 10 documents using LCS dynamic programming";
     TextOutA(hdc, 16, 40, sub, (int)strlen(sub));
 
-    // Panels
-    DrawPanel(hdc, a->panel1Rect, CLR_PANEL, CLR_BORDER);
-    DrawPanel(hdc, a->panel2Rect, CLR_PANEL, CLR_BORDER);
-
-    char hdr1[320], hdr2[320];
-    if (a->doc1.name[0])
-        snprintf(hdr1, sizeof(hdr1), "DOCUMENT 1 - %s", a->doc1.name);
-    else
-        snprintf(hdr1, sizeof(hdr1), "DOCUMENT 1");
-    if (a->doc2.name[0])
-        snprintf(hdr2, sizeof(hdr2), "DOCUMENT 2 - %s", a->doc2.name);
-    else
-        snprintf(hdr2, sizeof(hdr2), "DOCUMENT 2");
-
-    DrawSectionTitle(hdc, a->panel1Rect.left + 12, a->panel1Rect.top + 10, hdr1, hFontSection);
-    DrawSectionTitle(hdc, a->panel2Rect.left + 12, a->panel2Rect.top + 10, hdr2, hFontSection);
+    // File list
+    FileListRow rows[MAX_DOCS];
+    for (int i = 0; i < a->docCount; i++) {
+        rows[i].index      = i + 1;
+        rows[i].name       = a->docs[i].name;
+        rows[i].is_ocr     = a->docs[i].is_ocr;
+        rows[i].char_count = a->docs[i].normalized ? (int)strlen(a->docs[i].normalized) : 0;
+        memset(&rows[i].removeRect, 0, sizeof(RECT));
+    }
+    DrawFileListPanel(hdc, a->listRect, rows, a->docCount, MAX_DOCS,
+                      a->docCount < MAX_DOCS);
+    for (int i = 0; i < a->docCount; i++) a->removeRects[i] = rows[i].removeRect;
 
     // Results
-    DrawResultsPanel(hdc, a->resultsRect, &a->result);
+    MatrixResult mr;
+    memset(&mr, 0, sizeof(mr));
+    if (a->matrixCount > 0) {
+        for (int i = 0; i < a->matrixCount; i++) a->nameSlots[i] = a->docs[i].name;
+        mr.count             = a->matrixCount;
+        mr.names             = a->nameSlots;
+        mr.matrix            = a->matrix;
+        mr.top_a             = a->top_a;
+        mr.top_b             = a->top_b;
+        mr.top_percentage    = a->top_percentage;
+        mr.top_lcs_length    = a->top_lcs_length;
+        mr.top_verdict       = a->top_verdict_buf;
+        mr.top_verdict_color = a->top_verdict_color;
+        mr.top_lcs_preview   = a->top_lcs_preview;
+        mr.has_result        = 1;
+    }
+    DrawMatrixResultsPanel(hdc, a->resultsRect, &mr);
 
     SelectObject(hdc, old);
 }
 
-// -------- WndProc plumbing --------
+// ---------------------------------------------------------------------------
+// WndProc plumbing
+// ---------------------------------------------------------------------------
 
 static HWND MakeOwnerButton(HWND parent, int id, int x, int y, int w, int h, const char* text) {
     HWND b = CreateWindowExA(0, "BUTTON", text,
@@ -417,29 +525,15 @@ static HWND MakeOwnerButton(HWND parent, int id, int x, int y, int w, int h, con
     return b;
 }
 
-static HWND MakeEditPreview(HWND parent, int id) {
-    HWND e = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
-        WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-        0, 0, 100, 100, parent, (HMENU)(LONG_PTR)id,
-        (HINSTANCE)GetWindowLongPtr(parent, GWLP_HINSTANCE), NULL);
-    SendMessage(e, WM_SETFONT, (WPARAM)hFontMono, TRUE);
-    SetWindowTextA(e, "(no document loaded)");
-    return e;
-}
-
 static void OnCreate(HWND hwnd) {
     g_app.hwndMain = hwnd;
 
-    g_app.hwndPreview1   = MakeEditPreview(hwnd, ID_PREVIEW1);
-    g_app.hwndPreview2   = MakeEditPreview(hwnd, ID_PREVIEW2);
-
-    g_app.hwndBtnLoad1   = MakeOwnerButton(hwnd, ID_BTN_LOAD1,   0,0,0,0, "Load Text / PDF");
-    g_app.hwndBtnOcr1    = MakeOwnerButton(hwnd, ID_BTN_OCR1,    0,0,0,0, "Load Image / OCR");
-    g_app.hwndBtnLoad2   = MakeOwnerButton(hwnd, ID_BTN_LOAD2,   0,0,0,0, "Load Text / PDF");
-    g_app.hwndBtnOcr2    = MakeOwnerButton(hwnd, ID_BTN_OCR2,    0,0,0,0, "Load Image / OCR");
-    g_app.hwndBtnAnalyze = MakeOwnerButton(hwnd, ID_BTN_ANALYZE, 0,0,0,0, "ANALYZE PLAGIARISM");
-    g_app.hwndBtnSave    = MakeOwnerButton(hwnd, ID_BTN_SAVE,    0,0,0,0, "Save Report");
-    g_app.hwndBtnReset   = MakeOwnerButton(hwnd, ID_BTN_RESET,   0,0,0,0, "Reset");
+    g_app.hwndBtnAddText = MakeOwnerButton(hwnd, ID_BTN_ADD_TEXT, 0,0,0,0, "Add Text / PDF");
+    g_app.hwndBtnAddOcr  = MakeOwnerButton(hwnd, ID_BTN_ADD_OCR,  0,0,0,0, "Add Image / OCR");
+    g_app.hwndBtnAnalyze = MakeOwnerButton(hwnd, ID_BTN_ANALYZE,  0,0,0,0, "ANALYZE PLAGIARISM");
+    g_app.hwndBtnSave    = MakeOwnerButton(hwnd, ID_BTN_SAVE,     0,0,0,0, "Save Report");
+    g_app.hwndBtnReset   = MakeOwnerButton(hwnd, ID_BTN_RESET,    0,0,0,0, "Reset");
+    EnableWindow(g_app.hwndBtnAnalyze, FALSE);
     EnableWindow(g_app.hwndBtnSave, FALSE);
 
     g_app.hwndStatus = CreateWindowExA(0, "STATIC", "Ready",
@@ -449,24 +543,6 @@ static void OnCreate(HWND hwnd) {
     SendMessage(g_app.hwndStatus, WM_SETFONT, (WPARAM)hFontLabel, TRUE);
 
     Layout(&g_app);
-}
-
-static void HandleLoad(App* a, DocState* d, BOOL useOcr, HWND focusFor) {
-    char path[MAX_PATH] = "";
-    BOOL ok = useOcr
-        ? PickImageFile(a->hwndMain, path, sizeof(path))
-        : PickDocumentFile(a->hwndMain, path, sizeof(path));
-    if (!ok) return;
-    if (LoadDocFromPath(a, d, path, useOcr)) {
-        SetPreviewText(focusFor, d->text, d->name);
-        ResultReset(a);
-        EnableWindow(a->hwndBtnSave, FALSE);
-        InvalidateRect(a->hwndMain, NULL, TRUE);
-        char msg[512];
-        snprintf(msg, sizeof(msg), "Loaded %s (%zu chars)", d->name,
-                 d->normalized ? strlen(d->normalized) : 0);
-        SetStatus(a, msg);
-    }
 }
 
 static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -489,6 +565,19 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             return 0;
         }
 
+        case WM_LBUTTONDOWN: {
+            POINT pt;
+            pt.x = (SHORT)LOWORD(lParam);
+            pt.y = (SHORT)HIWORD(lParam);
+            for (int i = 0; i < g_app.docCount; i++) {
+                if (PtInRect(&g_app.removeRects[i], pt)) {
+                    RemoveDoc(&g_app, i);
+                    return 0;
+                }
+            }
+            return 0;
+        }
+
         case WM_DRAWITEM: {
             LPDRAWITEMSTRUCT dis = (LPDRAWITEMSTRUCT)lParam;
             const char* label = "Button";
@@ -502,35 +591,31 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             return TRUE;
         }
 
-        case WM_CTLCOLOREDIT:
         case WM_CTLCOLORSTATIC: {
             HDC hdcCtl = (HDC)wParam;
             SetTextColor(hdcCtl, CLR_TEXT_PRIMARY);
-            SetBkColor(hdcCtl, CLR_PANEL_ALT);
+            SetBkColor(hdcCtl, CLR_BACKGROUND);
             SetBkMode(hdcCtl, OPAQUE);
             static HBRUSH s_br = NULL;
-            if (!s_br) s_br = CreateSolidBrush(CLR_PANEL_ALT);
+            if (!s_br) s_br = CreateSolidBrush(CLR_BACKGROUND);
             return (LRESULT)s_br;
         }
 
         case WM_COMMAND: {
             int id = LOWORD(wParam);
             switch (id) {
-                case ID_BTN_LOAD1: HandleLoad(&g_app, &g_app.doc1, FALSE, g_app.hwndPreview1); break;
-                case ID_BTN_OCR1:  HandleLoad(&g_app, &g_app.doc1, TRUE,  g_app.hwndPreview1); break;
-                case ID_BTN_LOAD2: HandleLoad(&g_app, &g_app.doc2, FALSE, g_app.hwndPreview2); break;
-                case ID_BTN_OCR2:  HandleLoad(&g_app, &g_app.doc2, TRUE,  g_app.hwndPreview2); break;
-                case ID_BTN_ANALYZE: RunAnalysis(&g_app); break;
-                case ID_BTN_SAVE:    SaveReport(&g_app); break;
-                case ID_BTN_RESET:   ResetAll(&g_app); break;
+                case ID_BTN_ADD_TEXT: HandleAdd(&g_app, FALSE); break;
+                case ID_BTN_ADD_OCR:  HandleAdd(&g_app, TRUE);  break;
+                case ID_BTN_ANALYZE:  RunAnalysis(&g_app); break;
+                case ID_BTN_SAVE:     SaveReport(&g_app); break;
+                case ID_BTN_RESET:    ResetAll(&g_app); break;
             }
             return 0;
         }
 
         case WM_DESTROY:
-            DocReset(&g_app.doc1);
-            DocReset(&g_app.doc2);
-            ResultReset(&g_app);
+            for (int i = 0; i < g_app.docCount; i++) DocReset(&g_app.docs[i]);
+            MatrixReset(&g_app);
             if (g_app.ocrInited && g_app.ocrAvailable) ShutdownOCR();
             PostQuitMessage(0);
             return 0;

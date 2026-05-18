@@ -1,13 +1,13 @@
 # Plagiarism Detector — Win32 GUI in pure C
 
-A native Windows desktop application that compares two documents and reports a
-plagiarism similarity score using the **Longest Common Subsequence (LCS)**
-dynamic-programming algorithm. Built in plain C with the Win32 API — no Qt,
-no Electron, no .NET runtime. Drawing is hand-rolled GDI with owner-drawn
-controls and a dark theme.
+A native Windows desktop application that compares **up to 10 documents** in a
+single pass and reports an N×N similarity matrix using the **Longest Common
+Subsequence (LCS)** dynamic-programming algorithm. Built in plain C with the
+Win32 API — no Qt, no Electron, no .NET runtime. Drawing is hand-rolled GDI
+with owner-drawn controls and a dark theme.
 
-Inputs are flexible: each of the two documents can be plain text, a PDF (any
-page count, including 5+ pages), or an image (OCR via Tesseract).
+Inputs are flexible: each document can be plain text, a PDF (any page count,
+including 5+ pages), or an image (OCR via Tesseract).
 
 > **Project type:** DAA (Design & Analysis of Algorithms) mini project.
 > **Language:** C99. **UI:** Win32 + GDI. **Build:** MinGW64 / MSYS2.
@@ -32,19 +32,23 @@ page count, including 5+ pages), or an image (OCR via Tesseract).
 
 ## Features
 
-- **Dual-document compare** in a single window — side-by-side panels with
-  per-document previews.
+- **N-way document compare** in a single window — add up to 10 files of mixed
+  types, run one analyze pass, see every pairwise similarity.
+- **Color-coded N×N matrix** in the results panel (red HIGH / yellow MEDIUM /
+  green LOW). The top pair is outlined for quick spotting.
 - **Three input formats per document:**
   - **Text** — `.txt`
   - **PDF** — extracted via `pdftotext` (poppler), any page count
   - **Image** — `.png`, `.jpg`, `.jpeg`, `.bmp`, `.tif`, `.tiff` (OCR via Tesseract)
+- **Add / Remove file flow** — load files one at a time, remove any with a
+  per-row Remove button.
 - **LCS dynamic programming** with two strategies:
-  - Full-table DP when memory allows (~8M cells) so the *matching segment*
-    can be reconstructed and shown in the result panel.
-  - Rolling two-row DP (`O(min(n, m))` memory) as fallback for very large pairs.
+  - Rolling two-row DP (`O(min(n, m))` memory) for every matrix cell — cheap.
+  - Full-table DP (~8M cell cap) run **once** on the highest-scoring pair so
+    the matched segment can be reconstructed and shown in the report.
 - **Text normalization** before compare — lower-case, alphanumeric-only, single
   spaces — so cosmetic formatting differences do not inflate similarity.
-- **3-band verdict:**
+- **3-band verdict** (applied to the top pair):
 
   | Similarity   | Verdict                       |
   |--------------|-------------------------------|
@@ -52,38 +56,48 @@ page count, including 5+ pages), or an image (OCR via Tesseract).
   | `40 – 69 %`  | MEDIUM — Suspicious           |
   | `< 40 %`     | LOW — Looks original          |
 
-- **Save text report** with similarity %, verdict, LCS length, and matching
-  segment.
+- **Save text report** with the full ASCII similarity matrix, file index,
+  highest-pair verdict, and matched segment.
 - **Native dark theme** drawn by hand (no theme libraries) with custom
-  owner-drawn buttons and progress bar.
+  owner-drawn buttons and matrix grid.
 
 ---
 
 ## UI layout
 
 ```
-+---------------------------------------------------------+
-|  PLAGIARISM DETECTOR                                    |
-|  Compare two documents using LCS dynamic programming    |
-|                                                         |
-|  +---------------------+   +---------------------+      |
-|  | DOCUMENT 1          |   | DOCUMENT 2          |      |
-|  | <preview>           |   | <preview>           |      |
-|  | [Load Text/PDF]     |   | [Load Text/PDF]     |      |
-|  | [Load Image / OCR]  |   | [Load Image / OCR]  |      |
-|  +---------------------+   +---------------------+      |
-|                                                         |
-|              [ ANALYZE PLAGIARISM ]                     |
-|                                                         |
-|  RESULTS                                                |
-|  Similarity   ##############__________  67.3 %          |
-|  Verdict      MEDIUM - Suspicious                       |
-|  LCS Length   412 characters                            |
-|  Matching segment: the quick brown fox jumps over ...   |
-|                                                         |
-|  [ Save Report ]  [ Reset ]    Ready                    |
-+---------------------------------------------------------+
++----------------------------------------------------------------------------+
+|  PLAGIARISM DETECTOR                                                       |
+|  Compare up to 10 documents using LCS dynamic programming                  |
+|                                                                            |
+|  +----------------------------------------------------------------------+  |
+|  | FILES TO COMPARE   (4 / 10)                                          |  |
+|  | 1.  essay_alice.txt          5210 chars               [ Remove ]     |  |
+|  | 2.  essay_bob.pdf            6041 chars               [ Remove ]     |  |
+|  | 3.  essay_carol.png [OCR]    4988 chars               [ Remove ]     |  |
+|  | 4.  essay_dan.txt            5102 chars               [ Remove ]     |  |
+|  +----------------------------------------------------------------------+  |
+|  [ Add Text / PDF ]  [ Add Image / OCR ]            [ ANALYZE PLAGIARISM ] |
+|                                                                            |
+|  RESULTS — 4 files, 6 pairs                                                |
+|  Highest pair   essay_alice.txt  vs  essay_bob.pdf     78.2 %              |
+|  Verdict        HIGH - Likely Plagiarism                                   |
+|  LCS length     4082 characters                                            |
+|  ----------------------------------------------------------------------    |
+|              #1       #2       #3       #4                                 |
+|    1. alice   —    78.2 %   41.0 %   12.3 %                                |
+|    2. bob   78.2 %   —      39.8 %   15.6 %                                |
+|    3. carol 41.0 %  39.8 %    —      22.1 %                                |
+|    4. dan   12.3 %  15.6 %   22.1 %    —                                   |
+|                                                                            |
+|  Matching segment (top pair): the quick brown fox jumps over ...           |
+|                                                                            |
+|  [ Save Report ]  [ Reset ]                                Ready           |
++----------------------------------------------------------------------------+
 ```
+
+Cell colors: **red** ≥ 70 % (HIGH), **yellow** 40 – 69 % (MEDIUM),
+**green** < 40 % (LOW). The top-pair cell is outlined in white.
 
 ---
 
@@ -107,15 +121,26 @@ similarity (%) = LCS_length / max(len1, len2) * 100
 | `AnalyzeLCS`          | `O(n * m)`      | Yes (full segment)  | When `n*m <= ~8M` cells  |
 | `CalculateSimilarity` | `O(min(n, m))`  | No (length only)    | Fallback for huge inputs |
 
-### Pipeline
+### Pipeline (N documents)
 
 ```
-input file  ─►  loader (text / pdftotext / Tesseract OCR)
-            ─►  NormalizeText  (lowercase + alphanumeric + collapse spaces)
-            ─►  AnalyzeLCS  ──or──  CalculateSimilarity
-            ─►  similarity % + verdict + matched segment
-            ─►  GDI render to results panel
+each input file ─► loader (text / pdftotext / Tesseract OCR)
+                ─► NormalizeText  (lowercase + alphanumeric + collapse spaces)
+                ─► stored as docs[i]
+                                                                  ┌── matrix[i][j]
+on Analyze:    for every pair (i, j) where i < j:                 │
+               CalculateSimilarity (rolling-row DP)  ────────────►┤
+                                                                  │
+               highest pair (a, b):                               │
+               AnalyzeLCS (full DP, recover matched segment)  ────┘
+
+GDI render: N×N color-coded grid + top-pair headline + matched segment
+Save report: ASCII matrix + file index + matched segment
 ```
+
+For 10 files that's 45 pair comparisons; each pair is `O(n*m)` in time but
+only `O(min(n,m))` in memory, so analyzing 10 average essays takes a couple
+of seconds and well under 1 MB of RAM during the matrix pass.
 
 ---
 
@@ -218,13 +243,15 @@ $env:TESSDATA_PREFIX = "C:\msys64\mingw64\share\tessdata"
 ## Usage walkthrough
 
 1. Launch via `run.bat`.
-2. **DOCUMENT 1** panel:
-   - Click **Load Text/PDF** for `.txt` or `.pdf`, or
-   - Click **Load Image / OCR** for `.png/.jpg/.bmp/.tif`.
-3. Repeat for **DOCUMENT 2**.
-4. Click **ANALYZE PLAGIARISM**. The progress bar and verdict update.
-5. Read the result: similarity %, verdict band, LCS length, matched segment.
-6. **Save Report** writes a `.txt` summary. **Reset** clears both documents.
+2. Add files one by one (mix freely):
+   - **Add Text / PDF** picks `.txt` or `.pdf`.
+   - **Add Image / OCR** picks `.png/.jpg/.bmp/.tif` and runs OCR.
+3. Use the per-row **Remove** button to drop any file from the list.
+4. Click **ANALYZE PLAGIARISM** once you have at least 2 files.
+5. Read the result: colored N×N matrix, the highest-pair headline, verdict,
+   LCS length, and matched segment.
+6. **Save Report** writes a `.txt` with the full ASCII matrix and details.
+   **Reset** clears every file.
 
 ---
 
