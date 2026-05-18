@@ -35,13 +35,18 @@ including 5+ pages), or an image (OCR via Tesseract).
 - **N-way document compare** in a single window — add up to 10 files of mixed
   types, run one analyze pass, see every pairwise similarity.
 - **Color-coded N×N matrix** in the results panel (red HIGH / yellow MEDIUM /
-  green LOW). The top pair is outlined for quick spotting.
+  green LOW). The top pair is outlined in accent color for quick spotting.
 - **Three input formats per document:**
   - **Text** — `.txt`
   - **PDF** — extracted via `pdftotext` (poppler), any page count
   - **Image** — `.png`, `.jpg`, `.jpeg`, `.bmp`, `.tif`, `.tiff` (OCR via Tesseract)
-- **Add / Remove file flow** — load files one at a time, remove any with a
-  per-row Remove button.
+- **Multi-select file load** — Ctrl- or Shift-click in the file dialog to add
+  many files at once. The 10-file cap stops the batch cleanly and the status
+  bar reports `Added X. Y skipped (10-file cap)`.
+- **Live BUSY banner** — a prominent banner overlays the file list while OCR
+  or PDF extraction runs, so you always see what the app is doing during the
+  slow path instead of staring at a frozen window.
+- **Per-row Remove** — drop any file from the list with a single click.
 - **LCS dynamic programming** with two strategies:
   - Rolling two-row DP (`O(min(n, m))` memory) for every matrix cell — cheap.
   - Full-table DP (~8M cell cap) run **once** on the highest-scoring pair so
@@ -97,7 +102,20 @@ including 5+ pages), or an image (OCR via Tesseract).
 ```
 
 Cell colors: **red** ≥ 70 % (HIGH), **yellow** 40 – 69 % (MEDIUM),
-**green** < 40 % (LOW). The top-pair cell is outlined in white.
+**green** < 40 % (LOW). The top-pair cell is outlined in accent color.
+
+While OCR or PDF extraction runs, a BUSY banner overlays the file list:
+
+```
++----------------------------------------------------+
+| FILES TO COMPARE   (1 / 10)                        |
+|   +--------------------------------------------+   |
+|   |          BUSY — please wait                |   |
+|   |    Running OCR on essay_carol.png ...      |   |
+|   +--------------------------------------------+   |
+|   1.  essay_alice.txt  ...    [ Remove ]           |
++----------------------------------------------------+
+```
 
 ---
 
@@ -243,15 +261,32 @@ $env:TESSDATA_PREFIX = "C:\msys64\mingw64\share\tessdata"
 ## Usage walkthrough
 
 1. Launch via `run.bat`.
-2. Add files one by one (mix freely):
-   - **Add Text / PDF** picks `.txt` or `.pdf`.
-   - **Add Image / OCR** picks `.png/.jpg/.bmp/.tif` and runs OCR.
-3. Use the per-row **Remove** button to drop any file from the list.
-4. Click **ANALYZE PLAGIARISM** once you have at least 2 files.
-5. Read the result: colored N×N matrix, the highest-pair headline, verdict,
+2. Click **Add Text / PDF** or **Add Image / OCR**. The Windows file dialog
+   opens in multi-select mode:
+   - **Ctrl-click** to toggle individual files into the selection.
+   - **Shift-click** to select a contiguous range.
+   - **Ctrl + A** to pick everything in the folder.
+   - Click **Open** and every selected file loads in one shot.
+3. Watch the BUSY banner cycle through each file as it loads (especially
+   visible during OCR and PDF extraction, where each file can take seconds).
+4. Use the per-row **Remove** button to drop any file from the list. The
+   status bar at the bottom shows a running total like `Added 4 file(s).
+   Total: 4/10`.
+5. Click **ANALYZE PLAGIARISM** once you have at least 2 files. The button is
+   disabled below that threshold.
+6. Read the result: colored N×N matrix, the highest-pair headline, verdict,
    LCS length, and matched segment.
-6. **Save Report** writes a `.txt` with the full ASCII matrix and details.
+7. **Save Report** writes a `.txt` with the full ASCII matrix and details.
    **Reset** clears every file.
+
+### Status bar quick reference
+
+| Scenario                              | Status text                                                  |
+|---------------------------------------|--------------------------------------------------------------|
+| Multi-select all loaded cleanly       | `Added 4 file(s). Total: 4/10`                               |
+| Hit the 10-file cap mid-batch         | `Added 6 file(s). 3 skipped (10-file cap). Total: 10/10`     |
+| Some files failed to parse            | `Added 3 file(s). 1 failed to load. Total: 3/10`             |
+| Analyze finished                      | `Analysis complete: 6 pairs, highest 78.2%`                  |
 
 ---
 
@@ -273,19 +308,33 @@ For verbose DLL-load debugging, temporarily drop `-mwindows` from
 
 ## Implementation notes
 
-- **No external UI framework.** All controls (buttons, progress bar, panels)
+- **No external UI framework.** All controls (buttons, panels, matrix grid)
   are owner-drawn via GDI in `painter.c`. The window procedure is in `main.c`.
-- **Async-friendly analyze.** The analyze workflow is structured so OCR /
-  PDF extraction (the slow path) happens on file load, not on the
-  ANALYZE click; the LCS pass itself runs on the UI thread and completes
-  in milliseconds for typical inputs.
+- **Synchronous BUSY repaint.** OCR and PDF extraction run on the UI thread
+  and would normally freeze the window. Before each slow load, `ShowBusy`
+  invalidates the file-list rect *and* calls `UpdateWindow`, which pumps a
+  WM_PAINT immediately — so the banner actually appears before the thread
+  blocks, instead of after it returns.
+- **Multi-select via callback.** The file picker uses
+  `OFN_ALLOWMULTISELECT | OFN_EXPLORER` and parses both the single-file and
+  directory-plus-NUL-separated-filenames buffer formats. Callers pass a
+  `FilePickCallback` and can return `false` to stop the iteration early
+  (used here to honour the 10-file cap mid-batch).
+- **Pair-by-pair matrix.** `RunAnalysis` fills the N×N matrix with
+  `CalculateSimilarity` (rolling-row DP, cheap memory) for every i&lt;j pair,
+  then runs full-DP `AnalyzeLCS` **once** on the highest pair to recover
+  the matched segment for display and the report.
 - **Memory cap on full DP.** The full-table allocation is capped at roughly
   8 million cells (~64 MB at 8 bytes/cell). Pairs above this fall back to
   the rolling-row implementation; the match-segment field then shows the
   LCS length only.
-- **Normalization is destructive on copy, not on source.** Both inputs
-  are normalized into freshly allocated buffers — the previews still show
-  the original text.
+- **Memory cap on full DP.** The full-table allocation is capped at roughly
+  8 million cells (~64 MB at 8 bytes/cell). Pairs above this fall back to
+  the rolling-row implementation; the match-segment field then shows the
+  LCS length only.
+- **Normalization is on a copy.** Each document is normalized into a
+  freshly allocated buffer; the original extracted text is preserved on
+  the `DocState` for the report output.
 
 ---
 
