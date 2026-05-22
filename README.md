@@ -6,8 +6,9 @@ Subsequence (LCS)** dynamic-programming algorithm. Built in plain C with the
 Win32 API — no Qt, no Electron, no .NET runtime. Drawing is hand-rolled GDI
 with owner-drawn controls and a dark theme.
 
-Inputs are flexible: each document can be plain text, a PDF (any page count,
-including 5+ pages), or an image (OCR via Tesseract).
+Inputs are flexible: each document can be plain text, a **native-text PDF**,
+a **handwritten / scanned PDF** (auto-detected and routed through OCR), or
+an image (OCR via Tesseract).
 
 > **Project type:** DAA (Design & Analysis of Algorithms) mini project.
 > **Language:** C99. **UI:** Win32 + GDI. **Build:** MinGW64 / MSYS2.
@@ -36,21 +37,26 @@ including 5+ pages), or an image (OCR via Tesseract).
   types, run one analyze pass, see every pairwise similarity.
 - **Color-coded N×N matrix** in the results panel (red HIGH / yellow MEDIUM /
   green LOW). The top pair is outlined in accent color for quick spotting.
-- **Three input formats per document:**
+- **Four input modes per document:**
   - **Text** — `.txt`
-  - **PDF** — extracted via `pdftotext` (poppler), any page count
+  - **Native-text PDF** — extracted via `pdftotext` (poppler), any page count
+  - **Handwritten / scanned PDF** — auto-detected when `pdftotext` yields
+    < ~30 non-whitespace chars per page; the app then rasterizes each page
+    via `pdftoppm` at 200 DPI and OCRs every page with Tesseract
   - **Image** — `.png`, `.jpg`, `.jpeg`, `.bmp`, `.tif`, `.tiff` (OCR via Tesseract)
 - **Multi-select file load** — Ctrl- or Shift-click in the file dialog to add
   many files at once. The 10-file cap stops the batch cleanly and the status
   bar reports `Added X. Y skipped (10-file cap)`.
 - **Live BUSY banner** — a prominent banner overlays the file list while OCR
   or PDF extraction runs, so you always see what the app is doing during the
-  slow path instead of staring at a frozen window.
+  slow path instead of staring at a frozen window. Per-page progress
+  (`OCR page k/N - filename.pdf`) updates between every page for handwritten
+  PDFs, and the message pump is drained between pages/files so the OS keeps
+  the window marked responsive even on long batches.
 - **Per-row Remove** — drop any file from the list with a single click.
 - **LCS dynamic programming** with two strategies:
   - Rolling two-row DP (`O(min(n, m))` memory) for every matrix cell — cheap.
-  - Full-table DP (~8M cell cap) run **once** on the highest-scoring pair so
-    the matched segment can be reconstructed and shown in the report.
+  - Full-table DP (~8M cell cap) run **once** on the highest-scoring pair.
 - **Text normalization** before compare — lower-case, alphanumeric-only, single
   spaces — so cosmetic formatting differences do not inflate similarity.
 - **3-band verdict** (applied to the top pair):
@@ -61,8 +67,8 @@ including 5+ pages), or an image (OCR via Tesseract).
   | `40 – 69 %`  | MEDIUM — Suspicious           |
   | `< 40 %`     | LOW — Looks original          |
 
-- **Save text report** with the full ASCII similarity matrix, file index,
-  highest-pair verdict, and matched segment.
+- **Save text report** with the file index, highest-pair verdict, and the
+  full ASCII similarity matrix.
 - **Native dark theme** drawn by hand (no theme libraries) with custom
   owner-drawn buttons and matrix grid.
 
@@ -84,18 +90,15 @@ including 5+ pages), or an image (OCR via Tesseract).
 |  +----------------------------------------------------------------------+  |
 |  [ Add Text / PDF ]  [ Add Image / OCR ]            [ ANALYZE PLAGIARISM ] |
 |                                                                            |
-|  RESULTS — 4 files, 6 pairs                                                |
+|  RESULTS - 4 files, 6 pairs                                                |
 |  Highest pair   essay_alice.txt  vs  essay_bob.pdf     78.2 %              |
 |  Verdict        HIGH - Likely Plagiarism                                   |
-|  LCS length     4082 characters                                            |
 |  ----------------------------------------------------------------------    |
-|              #1       #2       #3       #4                                 |
-|    1. alice   —    78.2 %   41.0 %   12.3 %                                |
-|    2. bob   78.2 %   —      39.8 %   15.6 %                                |
-|    3. carol 41.0 %  39.8 %    —      22.1 %                                |
-|    4. dan   12.3 %  15.6 %   22.1 %    —                                   |
-|                                                                            |
-|  Matching segment (top pair): the quick brown fox jumps over ...           |
+|              1. alice...  2. bob...   3. carol...  4. dan...               |
+|   1. alice      -          78.2 %      41.0 %       12.3 %                 |
+|   2. bob       78.2 %       -          39.8 %       15.6 %                 |
+|   3. carol     41.0 %      39.8 %       -           22.1 %                 |
+|   4. dan       12.3 %      15.6 %      22.1 %        -                     |
 |                                                                            |
 |  [ Save Report ]  [ Reset ]                                Ready           |
 +----------------------------------------------------------------------------+
@@ -104,18 +107,24 @@ including 5+ pages), or an image (OCR via Tesseract).
 Cell colors: **red** ≥ 70 % (HIGH), **yellow** 40 – 69 % (MEDIUM),
 **green** < 40 % (LOW). The top-pair cell is outlined in accent color.
 
-While OCR or PDF extraction runs, a BUSY banner overlays the file list:
+While OCR or PDF extraction runs, a BUSY banner overlays the file list,
+positioned below the section header so the file rows above remain visible:
 
 ```
 +----------------------------------------------------+
-| FILES TO COMPARE   (1 / 10)                        |
+| FILES TO COMPARE   (3 / 10)                        |
+| 1.  essay_alice.txt          5210 chars   [Remove] |
+| 2.  essay_bob.pdf            6041 chars   [Remove] |
 |   +--------------------------------------------+   |
-|   |          BUSY — please wait                |   |
-|   |    Running OCR on essay_carol.png ...      |   |
+|   |          BUSY - please wait                |   |
+|   |  OCR page 3/12 - handwritten.pdf ...       |   |
 |   +--------------------------------------------+   |
-|   1.  essay_alice.txt  ...    [ Remove ]           |
 +----------------------------------------------------+
 ```
+
+For a handwritten / scanned PDF the banner text cycles per page
+(`OCR page k/N - filename.pdf`); for native-text PDFs it just reads
+`Extracting PDF: filename.pdf ...`.
 
 ---
 
@@ -142,19 +151,29 @@ similarity (%) = LCS_length / max(len1, len2) * 100
 ### Pipeline (N documents)
 
 ```
-each input file ─► loader (text / pdftotext / Tesseract OCR)
-                ─► NormalizeText  (lowercase + alphanumeric + collapse spaces)
+each input file ─► loader:
+                     .txt              -> read as-is
+                     .pdf (native)     -> pdftotext
+                     .pdf (handwritten)-> pdftoppm -r 200 -> Tesseract per page
+                     .png/.jpg/...     -> Tesseract OCR
+                ─► NormalizeText (lowercase + alphanumeric + collapse spaces)
                 ─► stored as docs[i]
-                                                                  ┌── matrix[i][j]
-on Analyze:    for every pair (i, j) where i < j:                 │
-               CalculateSimilarity (rolling-row DP)  ────────────►┤
-                                                                  │
-               highest pair (a, b):                               │
-               AnalyzeLCS (full DP, recover matched segment)  ────┘
 
-GDI render: N×N color-coded grid + top-pair headline + matched segment
-Save report: ASCII matrix + file index + matched segment
+on Analyze:    for every pair (i, j) where i < j:
+                   CalculateSimilarity (rolling-row DP)  ──► matrix[i][j]
+
+               highest pair (a, b):
+                   AnalyzeLCS (full DP) for the headline percentage
+
+GDI render: N×N color-coded grid + top-pair headline + verdict
+Save report: file index + verdict + ASCII similarity matrix
 ```
+
+**Handwritten-PDF detection.** After `pdftotext` returns, the loader counts
+non-whitespace bytes per page. Under ~30 chars/page → treat the PDF as
+scanned/handwritten, free the empty text, and re-run via the OCR path. The
+banner switches mid-load to `Handwritten PDF detected - running OCR on ...`
+then to the per-page `OCR page k/N` status.
 
 For 10 files that's 45 pair comparisons; each pair is `O(n*m)` in time but
 only `O(min(n,m))` in memory, so analyzing 10 average essays takes a couple
@@ -171,7 +190,8 @@ Plagiarism-Detector/
 ├── painter.h / .c     GDI helpers: panels, progress bar, results, buttons
 ├── algorithm.h / .c   NormalizeText + CalculateSimilarity + AnalyzeLCS
 ├── file_picker.h / .c Win32 GetOpenFileName / GetSaveFileName wrappers
-├── pdf_extract.h / .c pdftotext / pdfinfo subprocess wrappers
+├── pdf_extract.h / .c pdftotext / pdfinfo / pdftoppm subprocess wrappers
+│                      (incl. handwritten-PDF rasterize + per-page OCR loop)
 ├── ocr_engine.h / .c  Tesseract C-API wrapper
 ├── build.bat          MinGW64 build script
 ├── run.bat            Launcher that sets PATH + TESSDATA_PREFIX
@@ -205,6 +225,8 @@ After install you should have:
 | Tesseract DLL | `C:\msys64\mingw64\bin\libtesseract-*.dll`          |
 | English data  | `C:\msys64\mingw64\share\tessdata\eng.traineddata`  |
 | `pdftotext`   | `C:\msys64\mingw64\bin\pdftotext.exe`               |
+| `pdftoppm`    | `C:\msys64\mingw64\bin\pdftoppm.exe`                |
+| `pdfinfo`     | `C:\msys64\mingw64\bin\pdfinfo.exe`                 |
 
 ---
 
@@ -274,8 +296,9 @@ $env:TESSDATA_PREFIX = "C:\msys64\mingw64\share\tessdata"
    Total: 4/10`.
 5. Click **ANALYZE PLAGIARISM** once you have at least 2 files. The button is
    disabled below that threshold.
-6. Read the result: colored N×N matrix, the highest-pair headline, verdict,
-   LCS length, and matched segment.
+6. Read the result: colored N×N matrix (rows + columns both labelled with
+   `N. filename` and ellipsis-truncated to fit), the highest-pair headline,
+   and the verdict band.
 7. **Save Report** writes a `.txt` with the full ASCII matrix and details.
    **Reset** clears every file.
 
@@ -297,6 +320,7 @@ $env:TESSDATA_PREFIX = "C:\msys64\mingw64\share\tessdata"
 | Double-clicking exe → nothing happens    | MinGW DLLs not on PATH; `-mwindows` suppresses error | Launch via `run.bat`                                                                 |
 | OCR returns empty text                   | `TESSDATA_PREFIX` not set or `eng.traineddata` missing | `set TESSDATA_PREFIX=C:\msys64\mingw64\share\tessdata`; reinstall `tesseract-data-eng` |
 | PDF load fails or returns empty          | `pdftotext.exe` not on PATH                          | Install / reinstall `mingw-w64-x86_64-poppler`                                       |
+| Handwritten PDF returns empty            | `pdftoppm.exe` missing or `%TEMP%` not writable      | Install `mingw-w64-x86_64-poppler`; verify `%TEMP%` exists and is writable           |
 | Build fails: `tesseract/capi.h not found`| Tesseract dev headers missing                        | `pacman -S mingw-w64-x86_64-tesseract-ocr`                                           |
 | Build fails: `gcc not found`             | MinGW64 not in shell PATH                            | Use the MSYS2 MinGW64 shell, or add `C:\msys64\mingw64\bin` to PATH                  |
 | App opens but window appears blank/black | GDI font load failed (rare)                          | Verify Segoe UI is installed (default on Win 10/11)                                  |
@@ -315,6 +339,21 @@ For verbose DLL-load debugging, temporarily drop `-mwindows` from
   invalidates the file-list rect *and* calls `UpdateWindow`, which pumps a
   WM_PAINT immediately — so the banner actually appears before the thread
   blocks, instead of after it returns.
+- **Stay-responsive pump.** Between pages of a handwritten-PDF OCR run
+  (and between files in a multi-select batch) the loader calls a
+  `PumpMessages()` helper that drains the queue via `PeekMessage` — that
+  is what keeps Windows from marking the window "Not responding" on long
+  jobs. A `loading` flag in the `App` struct causes `WM_COMMAND` to drop
+  any button clicks pumped during that window, so the user cannot trigger
+  a re-entrant load or analyze pass on half-loaded state.
+- **Handwritten-PDF pipeline.** `ExtractTextFromHandwrittenPDF` creates a
+  unique subdirectory under `%TEMP%`, invokes
+  `pdftoppm -r 200 -png "<pdf>" "<temp>\p"`, enumerates the resulting
+  `p-*.png` files (lex-sorted, which equals page order because `pdftoppm`
+  pads digits consistently within one job), runs Tesseract on each page,
+  concatenates the pages with `\n\n` separators, and best-effort deletes
+  the temp directory at the end. Pages that fail OCR are skipped rather
+  than aborting the whole document.
 - **Multi-select via callback.** The file picker uses
   `OFN_ALLOWMULTISELECT | OFN_EXPLORER` and parses both the single-file and
   directory-plus-NUL-separated-filenames buffer formats. Callers pass a
@@ -326,12 +365,7 @@ For verbose DLL-load debugging, temporarily drop `-mwindows` from
   the matched segment for display and the report.
 - **Memory cap on full DP.** The full-table allocation is capped at roughly
   8 million cells (~64 MB at 8 bytes/cell). Pairs above this fall back to
-  the rolling-row implementation; the match-segment field then shows the
-  LCS length only.
-- **Memory cap on full DP.** The full-table allocation is capped at roughly
-  8 million cells (~64 MB at 8 bytes/cell). Pairs above this fall back to
-  the rolling-row implementation; the match-segment field then shows the
-  LCS length only.
+  the rolling-row implementation, which still produces the percentage.
 - **Normalization is on a copy.** Each document is normalized into a
   freshly allocated buffer; the original extracted text is preserved on
   the `DocState` for the report output.
