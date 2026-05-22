@@ -80,6 +80,11 @@ typedef struct {
 
     BOOL ocrInited;
     BOOL ocrAvailable;
+
+    // TRUE while a slow load (OCR / PDF) is running on the UI thread. We pump
+    // messages between OCR pages so the window stays responsive, but ignore
+    // button clicks via this guard so the user can't trigger re-entrant loads.
+    BOOL loading;
 } App;
 
 static App g_app;
@@ -167,6 +172,43 @@ static const char* VerdictFor(double pct, COLORREF* color) {
 // document loading / removal
 // ---------------------------------------------------------------------------
 
+// Heuristic: native-text PDFs usually yield well over 30 non-whitespace chars
+// per page. Scanned / handwritten PDFs return near-empty text from pdftotext.
+static int LooksScanned(const char* text, int pages) {
+    if (!text || pages <= 0) return 1;
+    int meaningful = 0;
+    for (const char* p = text; *p; p++) {
+        if (!isspace((unsigned char)*p)) meaningful++;
+    }
+    return (meaningful / pages) < 30;
+}
+
+typedef struct {
+    App* app;
+    const char* name;
+} PdfOcrCtx;
+
+// Drain the message queue once. Called between long OCR pages so the OS
+// keeps the window marked responsive ("Not responding" otherwise kicks in
+// after ~5 seconds of an unpumped queue). Button clicks during this window
+// are filtered out by the `loading` guard in WM_COMMAND.
+static void PumpMessages(void) {
+    MSG msg;
+    while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&msg);
+        DispatchMessageA(&msg);
+    }
+}
+
+static void OnPdfOcrProgress(int page, int total, void* user) {
+    PdfOcrCtx* ctx = (PdfOcrCtx*)user;
+    char msg[256];
+    snprintf(msg, sizeof(msg), "OCR page %d/%d - %s ...",
+             page, total, ctx->name);
+    ShowBusy(ctx->app, msg);
+    PumpMessages();
+}
+
 static int LoadDocFromPath(App* a, DocState* d, const char* path, BOOL useOcr) {
     DocReset(d);
     strncpy(d->path, path, sizeof(d->path) - 1);
@@ -194,6 +236,31 @@ static int LoadDocFromPath(App* a, DocState* d, const char* path, BOOL useOcr) {
     } else if (strcmp(ext, ".pdf") == 0) {
         SetStatus(a, "Extracting PDF text ...");
         text = ExtractTextFromPDF(path);
+
+        int pages = GetPDFPageCount(path);
+        if (LooksScanned(text, pages)) {
+            free(text);
+            text = NULL;
+
+            if (!a->ocrInited) {
+                a->ocrAvailable = InitializeOCR();
+                a->ocrInited = TRUE;
+            }
+            if (!a->ocrAvailable) {
+                SetStatus(a, "OCR unavailable - check tesseract install and TESSDATA_PREFIX");
+                return 0;
+            }
+
+            char banner[256];
+            snprintf(banner, sizeof(banner),
+                     "Handwritten PDF detected - running OCR on %s ...",
+                     GetBaseName(path));
+            ShowBusy(a, banner);
+
+            PdfOcrCtx ctx = { a, GetBaseName(path) };
+            text = ExtractTextFromHandwrittenPDF(path, OnPdfOcrProgress, &ctx);
+            if (text) d->is_ocr = 1;
+        }
     } else {
         SetStatus(a, "Reading file ...");
         text = ReadFileText(path);
@@ -239,6 +306,7 @@ static bool AddOneFileCB(const char* path, void* user) {
             snprintf(msg, sizeof(msg), "Loading %s ...", nm);
     }
     ShowBusy(s->app, msg);
+    PumpMessages();
 
     DocState* d = &s->app->docs[s->app->docCount];
     if (LoadDocFromPath(s->app, d, path, s->useOcr)) {
@@ -247,6 +315,7 @@ static bool AddOneFileCB(const char* path, void* user) {
     } else {
         s->skippedFail++;
     }
+    PumpMessages();
     return true;          // continue
 }
 
@@ -261,10 +330,12 @@ static void HandleAdd(App* a, BOOL useOcr) {
     s.useOcr = useOcr;
     s.addedOk = s.skippedFull = s.skippedFail = 0;
 
+    a->loading = TRUE;
     int picked = useOcr
         ? PickImageFiles(a->hwndMain, AddOneFileCB, &s)
         : PickDocumentFiles(a->hwndMain, AddOneFileCB, &s);
     (void)picked;
+    a->loading = FALSE;
 
     ClearBusy(a);
 
@@ -454,9 +525,6 @@ static void SaveReport(App* a) {
     WriteReportMatrix(f, a);
 
     fprintf(f, "----------------------------------------\r\n");
-    fprintf(f, "Matching LCS preview (top pair):\r\n");
-    if (a->top_lcs_preview) fputs(a->top_lcs_preview, f);
-    fprintf(f, "\r\n");
     fclose(f);
     SetStatus(a, "Report saved");
 }
@@ -568,11 +636,13 @@ static void OnPaint(App* a, HDC hdc) {
     for (int i = 0; i < a->docCount; i++) a->removeRects[i] = rows[i].removeRect;
 
     // Busy banner — drawn ON TOP of the file list while OCR / PDF runs.
+    // Positioned well below the "FILES TO COMPARE" section header so the
+    // header text + first file rows stay visible above it.
     if (a->busyMessage[0]) {
         RECT banner;
         banner.left   = a->listRect.left  + 24;
         banner.right  = a->listRect.right - 24;
-        banner.top    = a->listRect.top   + 48;
+        banner.top    = a->listRect.top   + 130;
         banner.bottom = banner.top + 72;
         if (banner.bottom > a->listRect.bottom - 12)
             banner.bottom = a->listRect.bottom - 12;
@@ -586,7 +656,7 @@ static void OnPaint(App* a, HDC hdc) {
         tag.bottom  = tag.top + 18;
         SelectObject(hdc, hFontLabel);
         SetTextColor(hdc, CLR_TEXT_PRIMARY);
-        DrawTextA(hdc, "BUSY — please wait", -1, &tag,
+        DrawTextA(hdc, "BUSY - please wait", -1, &tag,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
         // Main message
@@ -711,6 +781,12 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         }
 
         case WM_COMMAND: {
+            // Drop button clicks while a slow load is in flight. The OCR
+            // page loop pumps messages so the window stays responsive, but
+            // we don't want a stray click to launch another picker or kick
+            // off analysis on half-loaded state.
+            if (g_app.loading) return 0;
+
             int id = LOWORD(wParam);
             switch (id) {
                 case ID_BTN_ADD_TEXT: HandleAdd(&g_app, FALSE); break;

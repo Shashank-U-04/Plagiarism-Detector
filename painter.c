@@ -214,9 +214,18 @@ static void DrawMatrixGrid(HDC hdc, RECT area, const MatrixResult* r) {
         hc.top    = gridTop;
         hc.right  = hc.left + cellW;
         hc.bottom = gridTop + rowH;
-        char lbl[16];
-        snprintf(lbl, sizeof(lbl), "#%d", j + 1);
-        DrawTextA(hdc, lbl, -1, &hc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        // Match the row-header format: "N. filename". GDI handles the
+        // truncation via DT_END_ELLIPSIS, so long names degrade cleanly.
+        char lbl[320];
+        const char* nm = r->names[j] ? r->names[j] : "(unnamed)";
+        snprintf(lbl, sizeof(lbl), "%d. %s", j + 1, nm);
+
+        RECT lc = hc;
+        lc.left  += 6;
+        lc.right -= 6;
+        DrawTextA(hdc, lbl, -1, &lc,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 
     // ---- Data rows ----
@@ -345,7 +354,7 @@ void DrawMatrixResultsPanel(HDC hdc, RECT rect, const MatrixResult* r) {
     int pairCount = r->count >= 2 ? r->count * (r->count - 1) / 2 : 0;
     char hdr[128];
     if (r->has_result) {
-        snprintf(hdr, sizeof(hdr), "RESULTS — %d files, %d pairs", r->count, pairCount);
+        snprintf(hdr, sizeof(hdr), "RESULTS - %d files, %d pairs", r->count, pairCount);
     } else {
         snprintf(hdr, sizeof(hdr), "RESULTS");
     }
@@ -387,15 +396,6 @@ void DrawMatrixResultsPanel(HDC hdc, RECT rect, const MatrixResult* r) {
              r->top_verdict ? (int)strlen(r->top_verdict) : 0);
     y += 24;
 
-    SelectObject(hdc, hFontLabel);
-    SetTextColor(hdc, CLR_TEXT_MUTED);
-    TextOutA(hdc, x, y, "LCS length", 10);
-    char line[128];
-    snprintf(line, sizeof(line), "%d characters", r->top_lcs_length);
-    SetTextColor(hdc, CLR_TEXT_PRIMARY);
-    TextOutA(hdc, x + 110, y, line, (int)strlen(line));
-    y += 24;
-
     // Divider
     HPEN pen = CreatePen(PS_SOLID, 1, CLR_BORDER);
     HPEN oldPen = (HPEN)SelectObject(hdc, pen);
@@ -412,34 +412,7 @@ void DrawMatrixResultsPanel(HDC hdc, RECT rect, const MatrixResult* r) {
     matrixArea.right  = rect.right - 16;
     matrixArea.bottom = rect.bottom - 12;
 
-    // Reserve some space at the bottom for matched-segment preview if it fits
-    int segH = 70;
-    if (matrixArea.bottom - matrixArea.top > segH + 200 && r->top_lcs_preview && *r->top_lcs_preview) {
-        matrixArea.bottom -= segH;
-    } else {
-        segH = 0;
-    }
-
     DrawMatrixGrid(hdc, matrixArea, r);
-
-    // Matched segment under the matrix (when there is room)
-    if (segH > 0) {
-        int sy = matrixArea.bottom + 6;
-        SelectObject(hdc, hFontLabel);
-        SetTextColor(hdc, CLR_TEXT_MUTED);
-        TextOutA(hdc, x, sy, "Matching segment (top pair):", 28);
-
-        RECT pr;
-        pr.left   = x;
-        pr.top    = sy + 18;
-        pr.right  = rect.right - 16;
-        pr.bottom = rect.bottom - 8;
-
-        SelectObject(hdc, hFontMono);
-        SetTextColor(hdc, CLR_TEXT_PRIMARY);
-        DrawTextA(hdc, r->top_lcs_preview, -1, &pr,
-                  DT_LEFT | DT_TOP | DT_WORDBREAK | DT_END_ELLIPSIS | DT_EDITCONTROL);
-    }
 }
 
 // ---------------------------------------------------------------------------
